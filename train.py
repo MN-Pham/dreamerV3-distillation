@@ -57,6 +57,8 @@ def main(config):
     }
     torch.save(items_to_save, logdir / "latest.pt")
 
+    if config.save_buffer:
+        replay_buffer.save(logdir / "replay_buffer")
 
 if __name__ == "__main__":
     main()

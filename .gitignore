@@ -1,5 +1,5 @@
 # Logs / artifacts
-logdir/
+logdir*
 *.hydra/
 torch_compile_debug/
 
