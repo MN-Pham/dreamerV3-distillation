@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import torch
 from tensordict import TensorDict
 from torchrl.data.replay_buffers import LazyTensorStorage, ReplayBuffer
@@ -59,5 +62,69 @@ class Buffer:
         return self._buffer.storage.shape.numel()
     
     def save(self, path):
-        self._buffer.dumps(path)
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        storage = self._buffer.storage
+        if storage.shape is None:
+            raise RuntimeError("Cannot save an empty replay buffer.")
+
+        storage_path = path / "storage"
+        storage_path.mkdir(exist_ok=True)
+        active_data = storage.get(slice(0, storage.shape[0])).to("cpu")
+        active_data.memmap(storage_path)
+        self._buffer._sampler.dumps(path / "sampler")
+        self._buffer._writer.dumps(path / "writer")
+
+        if self._buffer._rng is not None:
+            rng_state = TensorDict(
+                rng_state=self._buffer._rng.get_state().clone(),
+                device=self._buffer._rng.device,
+            )
+            rng_state.memmap(path / "rng_state")
+
+        with (path / "buffer_metadata.json").open("w") as file:
+            json.dump(
+                {
+                    "format_version": 1,
+                    "batch_size": self._buffer._batch_size,
+                    "storage_len": storage._len,
+                    "storage_shape": list(active_data.shape),
+                },
+                file,
+            )
+
+    def load(self, path):
+        path = Path(path)
+        with (path / "buffer_metadata.json").open() as file:
+            metadata = json.load(file)
+        if metadata.get("format_version") != 1:
+            raise ValueError("Unsupported compact replay-buffer format.")
+
+        storage = self._buffer.storage
+        if storage.initialized:
+            raise RuntimeError("Load replay data only into a fresh buffer.")
+
+        active_data = TensorDict.load_memmap(path / "storage")
+        expected_shape = tuple(metadata["storage_shape"])
+        if tuple(active_data.shape) != expected_shape:
+            raise ValueError("Replay-buffer storage shape does not match its metadata.")
+
+        storage._init(active_data[0])
+        if active_data.shape[0] > storage._storage.shape[0]:
+            raise ValueError("Saved replay data exceeds the configured buffer capacity.")
+        storage._storage[: active_data.shape[0]].copy_(
+            active_data.to(storage.device)
+        )
+        storage._len = metadata["storage_len"]
+
+        self._buffer._sampler.loads(path / "sampler")
+        self._buffer._writer.loads(path / "writer")
+        self._buffer._batch_size = metadata["batch_size"]
+
+        rng_path = path / "rng_state"
+        if rng_path.exists():
+            rng_state = TensorDict.load_memmap(rng_path)
+            rng = torch.Generator(device=rng_state.device)
+            rng.set_state(rng_state["rng_state"])
+            self._buffer.set_rng(rng)
 
